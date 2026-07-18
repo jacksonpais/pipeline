@@ -1,8 +1,8 @@
 {
   "Repository": {
     "Root": "[local-project-path]",
-    "Name": "destineye.sharedkernel",
-    "PackageId": "DestinEye.SharedKernel"
+    "Name": "[repository-name]",
+    "PackageId": "[package-id]"
   },
   "Build": {
     "Configuration": "Release",
