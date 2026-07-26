@@ -1,17 +1,22 @@
 {
   "Repository": {
     "Root": "[local-project-path]",
-    "Name": "[repository-name]",
-    "PackageId": "[package-id]"
+    "Projects": [
+      {
+        "Name": "[repository-name]",
+        "Solution": "[solution-name]",
+        "ProjectFile": "[project-path]",
+        "PackageId": "[package-id]"
+      }
+    ]
   },
   "Build": {
     "Configuration": "Release",
-    "CleanBinObj": true,
-    "Restore": true,
-    "Build": true,
+    "Clean": true,
+    "DeleteBin": true,
+    "DeleteObj": true,
     "Pack": true
   },
-
   "NuGet": {
     "OutputFolder": "[local-nuget-package-path]"
   }
