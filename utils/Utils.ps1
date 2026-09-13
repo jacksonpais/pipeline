@@ -14,7 +14,7 @@ function Find-Solution {
     return $solution
 }
 
-function Get-SolutionProjects {
+function Get-MainProject {
 
     param(
         [string]$SolutionFile
@@ -23,8 +23,6 @@ function Get-SolutionProjects {
     $solutionDirectory = Split-Path $SolutionFile -Parent
 
     $lines = Get-Content $SolutionFile
-
-    $projects = @()
 
     foreach ($line in $lines) {
 
@@ -38,88 +36,194 @@ function Get-SolutionProjects {
 
             $projectPath = [System.IO.Path]::GetFullPath($projectPath)
 
-            if (Test-Path $projectPath) {
-
-                $projects += $projectPath
-            }
-        }
-    }
-
-    return $projects
-}
-
-function Get-ProjectPackageId {
-
-    param(
-        [string]$ProjectFile
-    )
-
-    [xml]$xml = Get-Content $ProjectFile -Raw
-
-    foreach ($group in $xml.Project.PropertyGroup) {
-
-        $node = $group.SelectSingleNode("PackageId")
-
-        if ($null -ne $node) {
-
-            if (![string]::IsNullOrWhiteSpace($node.InnerText)) {
-                return $node.InnerText.Trim()
-            }
-        }
-    }
-
-    # Default PackageId = project filename
-    return [System.IO.Path]::GetFileNameWithoutExtension($ProjectFile)
-}
-
-function Get-PackageReferences {
-
-    param(
-        [string]$ProjectFile
-    )
-
-    [xml]$xml = Get-Content $ProjectFile -Raw
-
-    $references = @()
-
-    foreach ($itemGroup in $xml.Project.ItemGroup) {
-
-        $condition = $itemGroup.Condition
-
-        if ($condition -and
-            $condition -notmatch "UseProjectReference.*!=.*'true'") {
-
-            continue
-        }
-
-        foreach ($reference in $itemGroup.PackageReference) {
-
-            $include = $reference.Include
-
-            if ([string]::IsNullOrWhiteSpace($include)) {
+            if (-not (Test-Path $projectPath)) {
                 continue
             }
 
-            $version = $reference.Version
+            [xml]$xml = Get-Content $projectPath
 
-            $references += [PSCustomObject]@{
-                PackageId = $include
-                Version   = if ($version) { $version } else { $null }
+            $sdk = $xml.Project.Sdk
+
+            if ($sdk -eq "Microsoft.NET.Sdk.Web") {
+                return $projectPath
             }
         }
     }
 
-    return $references
+    return $null
 }
 
-function Resolve-PathSafe {
-
+function Get-ProjectInfo {
     param(
-        [string]$BasePath,
-        [string]$RelativePath
+        [string]$ProjectFile,
+        [string]$Version
     )
 
-    $path = Join-Path $BasePath $RelativePath
+    [xml]$xml = Get-Content $ProjectFile
+    $projectNode = $xml.Project
 
-    return [System.IO.Path]::GetFullPath($path)
+    $projectName = [System.IO.Path]::GetFileNameWithoutExtension($ProjectFile)
+
+    $packageId = $null
+
+    $packageIdNode = $projectNode.PropertyGroup.PackageId |
+    Select-Object -First 1
+
+    if ($packageIdNode) {
+        $packageId = $packageIdNode.ToString().Trim()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($packageId)) {
+        $packageId = $projectName
+    }
+
+    return [ordered]@{
+        Name         = $projectName
+        File         = [System.IO.Path]::GetFullPath($ProjectFile)
+        PackageId    = $packageId
+        Version      = $Version
+        Dependencies = @()
+    }
+}
+
+function Read-DirectoryBuildProps { 
+    param( [string]$File ) 
+    if (-not (Test-Path $File)) { 
+        return $null 
+    } 
+    [xml]$xml = Get-Content $File 
+    return $xml 
+} 
+
+function Get-BuildVersion {
+    param( [xml]$DirectoryBuildProps ) 
+    if ($null -eq $DirectoryBuildProps) { 
+        return $null 
+    } 
+    $versionNode = $DirectoryBuildProps.Project.PropertyGroup.Version | Select-Object -First 1 
+    if ($versionNode) { 
+        $version = $versionNode.ToString().Trim() 
+        if (-not [string]::IsNullOrWhiteSpace($version)) { 
+            return $version 
+        } 
+    } 
+    return $null 
+}
+
+function Get-ProjectReferences {
+
+    param(
+        [string]$ProjectFile
+    )
+
+    [xml]$xml = Get-Content $ProjectFile
+
+    $projectDirectory = Split-Path $ProjectFile -Parent
+
+    $dependencies = @()
+
+    foreach ($projectReference in $xml.Project.ItemGroup.ProjectReference) {
+
+        $referencePath = $projectReference.Include
+
+        if ([string]::IsNullOrWhiteSpace($referencePath)) {
+            continue
+        }
+
+        $dependencyFile = Join-Path `
+            $projectDirectory `
+            $referencePath
+
+        $dependencyFile = [System.IO.Path]::GetFullPath(
+            $dependencyFile
+        )
+
+        if (Test-Path $dependencyFile) {
+            $dependencies += $dependencyFile
+        }
+    }
+
+    return $dependencies
+}
+
+function Get-ProjectTree {
+    param(
+        [string]$ProjectFile,
+        [string]$Version,
+        [hashtable]$Visited
+    )
+
+    $ProjectFile = [System.IO.Path]::GetFullPath($ProjectFile)
+
+    # Prevent circular references in the current dependency path
+    if ($Visited.ContainsKey($ProjectFile)) {
+        return $null
+    }
+
+    $Visited[$ProjectFile] = $true
+
+    # Create project object
+    $project = Get-ProjectInfo `
+        -ProjectFile $ProjectFile `
+        -Version $Version
+
+    # Get direct project references
+    $references = Get-ProjectReferences `
+        -ProjectFile $ProjectFile
+
+    # Recursively build dependency tree
+    foreach ($reference in $references) {
+
+        $dependency = Get-ProjectTree `
+            -ProjectFile $reference `
+            -Version $Version `
+            -Visited $Visited
+
+        if ($null -ne $dependency) {
+            $project.Dependencies += $dependency
+        }
+    }
+
+    # Remove from visited after this branch is complete.
+    # This allows the same project to appear under different branches.
+    $Visited.Remove($ProjectFile)
+
+    return $project
+}
+
+function Add-UniqueProjects {
+    param(
+        [object]$Project,
+        [hashtable]$UniqueProjects
+    )
+
+    if ($null -eq $Project) {
+        return
+    }
+
+    $projectFile = [System.IO.Path]::GetFullPath($Project.File)
+
+    # Add only if we haven't seen this project before
+    if (-not $UniqueProjects.ContainsKey($projectFile)) {
+
+        $projectDirectory = Split-Path $projectFile -Parent
+
+        # Project folder name
+        $projectName = Split-Path $projectDirectory -Leaf
+
+        $UniqueProjects[$projectFile] = [ordered]@{
+            Name        = $projectName
+            Solution    = $Project.Name
+            ProjectFile = $Project.File
+            PackageId   = $Project.PackageId
+        }
+    }
+
+    # Process dependencies recursively
+    foreach ($dependency in @($Project.Dependencies)) {
+
+        Add-UniqueProjects `
+            -Project $dependency `
+            -UniqueProjects $UniqueProjects
+    }
 }
